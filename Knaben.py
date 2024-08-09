@@ -1,41 +1,103 @@
-from novaprinter import prettyPrinter
-from helpers import retrieve_url
+"""Knaben Database Yas
 
-class knaben(object):
-    url = 'https://knaben.eu'
-    name = 'Knaben'
-    supported_categories = {'all': 'all'}
+"""
 
-    def search(self, what, cat='all'):
-        search_url = f"{self.url}/search/{what}"
-        html = retrieve_url(search_url)
-        
-        self.parse(html)
+from urllib.parse import urlencode
+from datetime import datetime
+from json import loads, dumps
 
-    def parse(self, html):
-        from lxml import html as lh
-        tree = lh.fromstring(html)
-        
-        results = tree.xpath('//table[@class="table"]/tbody/tr')
-        for result in results:
-            title = result.xpath('.//td[@class="title"]/a/text()')[0]
-            link = result.xpath('.//td[@class="title"]/a/@href')[0]
-            size = result.xpath('.//td[@class="size"]/text()')[0]
-            seeders = result.xpath('.//td[@class="seeders"]/text()')[0]
-            leechers = result.xpath('.//td[@class="leechers"]/text()')[0]
-            
-            prettyPrinter({
-                'name': title,
-                'size': size,
-                'seeds': seeders,
-                'leech': leechers,
-                'link': self.url + link,
-                'desc_link': self.url + link,
-                'engine_url': self.url,
-                'file': self.url + link
-            })
+from searx.utils import (
+    eval_xpath_getindex,
+    extract_text,
+    get_torrent_size,
+    int_or_zero,
+)
 
-# Testing
-if __name__ == "__main__":
-    engine = knaben()
-    engine.search('test')
+# about
+about = {
+    "website": 'https://knaben.eu/',
+    "wikidata_id": None,
+    "official_api_documentation": "https://knaben.eu/api/v1/",
+    "use_official_api": True,
+    "require_api_key": False,
+    "results": 'JSON',
+}
+
+# engine dependent config
+categories = ['files']
+paging = True
+
+# search-url
+base_url = 'https://knaben.eu'
+search_url = "https://api.knaben.eu/v1"
+
+# Knaben specific type-definitions
+search_types = {
+    "files": None,
+    "music": [1000000, 6007000],
+    "videos": [2000000, 3000000, 6001000, 6002000, 6003000, 6004000, 6005000, 6008000 ]
+}
+
+# do search-request
+def request(query, params):
+    search_type = search_types.get(params["category"], None)
+    size = 50
+    hide_xxx = params["safesearch"] > 0
+    hide_unsafe = params["safesearch"] > 1
+    query = {
+        "search_type": "100%",
+        "search_field": "title",
+        "query": query,
+        "order_by": "seeders",
+        "order_direction": "desc",
+        "from": (params["pageno"] - 1) * size,
+        "size": size,
+        "hide_unsafe": hide_unsafe,
+        "hide_xxx": hide_xxx
+    }
+
+    if search_type is not None:
+        query["categories"] = search_type
+
+    params['method'] = 'POST'
+    params['url'] = search_url
+    params["data"] = dumps(query)
+    params['headers']['Content-Type'] = 'application/json'
+    logger.debug("query_url --> %s", params['url'])
+    return params
+
+
+# get response from search-request
+def response(resp):
+    results = []
+
+    search_res = loads(resp.text)
+
+    for hit in search_res.get("hits", []):
+        if hit["bytes"] == 0 or "link" not in hit:  # Small chance there is a miss in the indexing
+            continue
+
+
+        date_str = hit["date"]
+        if date_str.count("-") > 2 or "+" in date_str:  # Sometimes the format includes timezone ...
+            date = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%S%z")
+        else:
+            date = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%S")
+
+        results.append(
+            {
+                'url': hit["details"],
+                'title': hit["title"],
+                'metadata': hit["category"],
+                'seed': hit["seeders"],
+                'leech': hit["peers"],
+                'filesize': hit["bytes"],
+                "publishedDate": date,
+                'torrentfile': hit["link"],
+                'magnetlink': hit["magnetUrl"],
+                'template': 'torrent.html',
+            }
+        )
+
+    return results
+
